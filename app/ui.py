@@ -26,6 +26,97 @@ def _pivot_to_long(pivot_df: pd.DataFrame, category_col: str, value_col: str) ->
     df_long["月份"] = pd.to_datetime(df_long["月份"], format="%Y-%m", errors="coerce")
     return df_long
 
+# 辅助：将续费结果重命名为中文列，并生成折线图所需的长表
+def _rename_cohort_for_display(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if "Den" in out.columns:
+        out = out.rename(columns={"Den":"分母","Num":"分子","RatePct":"续费率"})
+    return out
+
+def _cohort_long_pair(df_cn: pd.DataFrame) -> pd.DataFrame:
+    d = df_cn.copy()
+    d["月份"] = pd.to_datetime(d["Month"], format="%Y-%m", errors="coerce")
+    keep = ["月份","分子","分母"]
+    exist = [c for c in keep if c in d.columns]
+    return d[exist].melt(id_vars=["月份"], var_name="指标", value_name="人数")
+
+def _cohort_long_rate(df_cn: pd.DataFrame) -> pd.DataFrame:
+    d = df_cn.copy()
+    d["月份"] = pd.to_datetime(d["Month"], format="%Y-%m", errors="coerce")
+    if "续费率" in d.columns:
+        return d[["月份","续费率"]].rename(columns={"续费率":"数值"})
+    else:
+        return d[["月份"]].assign(数值=None)
+
+# 辅助：输出统一的列顺序（先重命名 Month->月份，再按顺序挑列）
+def _select_month_cn(df: pd.DataFrame, cols_order=None) -> pd.DataFrame:
+    if cols_order is None:
+        cols_order = ["Month","分子","分母","续费率"]
+    df2 = df.copy()
+    # 先重命名 Month → 月份
+    df2 = df2.rename(columns={"Month":"月份"})
+    # 将期望顺序中的 Month 替换为 月份
+    cols_cn = [("月份" if c=="Month" else c) for c in cols_order if c in (list(df.columns)+["月份"])]
+    # 去重保持顺序
+    seen = set(); ordered = []
+    for c in cols_cn:
+        if c not in seen and c in df2.columns:
+            seen.add(c); ordered.append(c)
+    return df2[ordered]
+
+# 组合折线图：分子/分母（左轴）+ 续费率（右轴），时间轴对齐
+def _layer_counts_and_rate(counts_long: pd.DataFrame, rate_long: pd.DataFrame, height: int = 260):
+    base_x = alt.X("月份:T", axis=alt.Axis(format="%Y-%m", title="月份"))
+    left_y = alt.Y("人数:Q", title="人数")
+    right_y = alt.Y("数值:Q", axis=alt.Axis(title="续费率(%)", orient="right"))
+    layer_counts = alt.Chart(counts_long).mark_line(point=True).encode(
+        x=base_x,
+        y=left_y,
+        color=alt.Color("指标:N", title="指标(分子/分母)"),
+        tooltip=["月份","指标","人数"]
+    )
+    layer_rate = alt.Chart(rate_long).mark_line(point=True, color="#d62728").encode(
+        x=base_x,
+        y=right_y,
+        tooltip=["月份","数值"]
+    )
+    return alt.layer(layer_counts, layer_rate).resolve_scale(y='independent').properties(height=height).interactive()
+
+# 预计算：同月 Cohort 明细（避免每次选择都重新计算）
+def _compute_cohort_details(df: pd.DataFrame, end_month: pd.Timestamp, tol_max_mod: int) -> pd.DataFrame:
+    import pandas as pd
+    from app.logic import months_range
+    rows = []
+    min_month = df["FJM"].min()
+    for m in months_range(min_month, end_month):
+        m_idx = m.year*12 + m.month
+        mon = m.month
+        cohort = df[(df["FJM"].dt.month == mon) & (df["FIdx"] < m_idx)]
+        cohort_size = cohort.shape[0]
+        earlier = cohort[cohort["EIdx"] < m_idx].shape[0]
+        if tol_max_mod == 0:
+            aligned = cohort[(cohort["EIdx"] >= m_idx) & ((cohort["EIdx"] - m_idx) % 12 == 0)]
+            den = aligned.shape[0]
+            num = aligned[(aligned["EIdx"] - m_idx) >= 12].shape[0]
+            due_now = aligned[(aligned["EIdx"] - m_idx) == 0].shape[0]
+        else:
+            aligned = cohort[(cohort["EIdx"] >= m_idx) & ((cohort["EIdx"] - m_idx) % 12 <= tol_max_mod)]
+            den = aligned.shape[0]
+            num = aligned[(aligned["EIdx"] - m_idx) >= 1].shape[0]
+            due_now = aligned[(aligned["EIdx"] - m_idx) == 0].shape[0]
+        rate = round(num/den*100,2) if den>0 else None
+        rows.append({
+            "Month": m.strftime("%Y-%m"),
+            "cohort规模": cohort_size,
+            "早于当月到期": earlier,
+            "分母": den,
+            "分子": num,
+            "续费率": rate,
+            "当月应续(严格)": due_now if tol_max_mod==0 else None,
+            "口径": "严格12" if tol_max_mod==0 else "12-14容差",
+        })
+    return pd.DataFrame(rows)
+
 with st.sidebar:
     st.header("设置")
     uploaded = st.file_uploader("上传数据文件（CSV/XLSX）", type=["csv","xlsx"])
@@ -153,83 +244,98 @@ charts = []
 if "同月Cohort-严格12" in logic_select:
     cohort_strict = compute_cohort_monthly(DF, end_m, tolerance_max_mod=0)
     st.markdown("**同月 Cohort（严格12）**：cohort=历年同月首入且首入<当月；对齐 offset%12==0；分子 offset≥12；分母 offset≥0")
-    st.dataframe(cohort_strict)
-    st.line_chart(cohort_strict.set_index("Month")["RatePct"], height=260)
-    charts.append(("cohort_strict.csv", cohort_strict))
+    cstrict_cn = _rename_cohort_for_display(cohort_strict)
+    # 表格列顺序：月份、分子、分母、续费率
+    cols_show = [c for c in ["Month","分子","分母","续费率"] if c in (list(cstrict_cn.columns)+["Month"])]
+    st.dataframe(_select_month_cn(cstrict_cn, cols_show))
+    dl_pair = _cohort_long_pair(cstrict_cn)
+    dl_rate = _cohort_long_rate(cstrict_cn)
+    st.altair_chart(_layer_counts_and_rate(dl_pair, dl_rate), use_container_width=True)
+    charts.append(("cohort_strict.csv", _select_month_cn(cstrict_cn, cols_show)))
 
 if "同月Cohort-12~14容差" in logic_select:
     cohort_tol = compute_cohort_monthly(DF, end_m, tolerance_max_mod=2)
     st.markdown("**同月 Cohort（12~14 容差）**：对齐 (offset%12)∈{0,1,2}；分子 offset≥1；分母 offset≥0")
-    st.dataframe(cohort_tol)
-    st.line_chart(cohort_tol.set_index("Month")["RatePct"], height=260)
-    charts.append(("cohort_tol.csv", cohort_tol))
+    ctol_cn = _rename_cohort_for_display(cohort_tol)
+    cols_show2 = [c for c in ["Month","分子","分母","续费率"] if c in (list(ctol_cn.columns)+["Month"])]
+    st.dataframe(_select_month_cn(ctol_cn, cols_show2))
+    dl_pair2 = _cohort_long_pair(ctol_cn)
+    dl_rate2 = _cohort_long_rate(ctol_cn)
+    st.altair_chart(_layer_counts_and_rate(dl_pair2, dl_rate2), use_container_width=True)
+    charts.append(("cohort_tol.csv", _select_month_cn(ctol_cn, cols_show2)))
 
 if "B/C/A-严格12" in logic_select:
     bca_strict = compute_bca_monthly(DF, end_m, tolerance_max_mod=0)
-    st.markdown("**B/C/A（严格12）**：A=当月首入；B=当月到期；C=次年同月到期；续= C−A_in_C；底= B+续")
-    st.dataframe(bca_strict)
-    st.line_chart(bca_strict.set_index("Month")["RatePct"], height=260)
-    charts.append(("bca_strict.csv", bca_strict))
+    st.markdown("**B/C/A（严格12）**：A=当月首入；B=当月到期；C=次年同月到期；分子(续)= C−A_in_C；分母(底)= B+分子")
+    bcn = bca_strict.rename(columns={"Renew":"分子","Base":"分母","RatePct":"续费率"})
+    cols_b1 = [c for c in ["Month","分子","分母","续费率"] if c in (list(bcn.columns)+["Month"])]
+    st.dataframe(_select_month_cn(bcn, cols_b1))
+    dl_b_pair = _cohort_long_pair(bcn)
+    dl_b_rate = _cohort_long_rate(bcn)
+    st.altair_chart(_layer_counts_and_rate(dl_b_pair, dl_b_rate), use_container_width=True)
+    charts.append(("bca_strict.csv", _select_month_cn(bcn, cols_b1)))
 
 if "B/C/A-12~14容差" in logic_select:
     bca_tol = compute_bca_monthly(DF, end_m, tolerance_max_mod=2)
-    st.markdown("**B/C/A（12~14 容差）**：C/A_in_C 使用 12~14 月窗口")
-    st.dataframe(bca_tol)
-    st.line_chart(bca_tol.set_index("Month")["RatePct"], height=260)
-    charts.append(("bca_tol.csv", bca_tol))
+    st.markdown("**B/C/A（12~14 容差）**：C/A_in_C 使用 12~14 月窗口；分子= C(12~14) − A_in_C(12~14)；分母= B+分子")
+    btn = bca_tol.rename(columns={"Renew":"分子","Base":"分母","RatePct":"续费率"})
+    cols_b2 = [c for c in ["Month","分子","分母","续费率"] if c in (list(btn.columns)+["Month"])]
+    st.dataframe(_select_month_cn(btn, cols_b2))
+    dl_btn_pair = _cohort_long_pair(btn)
+    dl_btn_rate = _cohort_long_rate(btn)
+    st.altair_chart(_layer_counts_and_rate(dl_btn_pair, dl_btn_rate), use_container_width=True)
+    charts.append(("bca_tol.csv", _select_month_cn(btn, cols_b2)))
 
 # ============ 续费率明细（单月拆解） ============
 st.divider()
-st.subheader("续费率明细（选择月份查看更多数值）")
+st.subheader("续费率明细（全部月份，已预计算）")
 
-month_list = None
-if "cohort_strict" in locals():
-    month_list = list(cohort_strict["Month"]) 
-elif "cohort_tol" in locals():
-    month_list = list(cohort_tol["Month"]) 
-else:
-    month_list = sorted(list({d.strftime("%Y-%m") for d in DF["FJM"].unique()}))
+# 预计算两版明细，直接展示（并提供折叠）
+detail_strict = _compute_cohort_details(DF, end_m, tol_max_mod=0)
+detail_tol = _compute_cohort_details(DF, end_m, tol_max_mod=2)
 
-sel = st.selectbox("选择月份", month_list, index=len(month_list)-1 if month_list else 0)
-if sel:
-    m = pd.to_datetime(sel + "-01")
-    m_idx = m.year*12 + m.month
-    mon = m.month
-    cohort = DF[(DF["FJM"].dt.month == mon) & (DF["FIdx"] < m_idx)]
-    cohort_size = cohort.shape[0]
-    earlier = cohort[cohort["EIdx"] < m_idx].shape[0]
-    aligned_strict = cohort[(cohort["EIdx"] >= m_idx) & ((cohort["EIdx"] - m_idx) % 12 == 0)]
-    aligned_tol = cohort[(cohort["EIdx"] >= m_idx) & ((cohort["EIdx"] - m_idx) % 12 <= 2)]
-    den_strict = aligned_strict.shape[0]
-    num_strict = aligned_strict[(aligned_strict["EIdx"] - m_idx) >= 12].shape[0]
-    due_now = aligned_strict[(aligned_strict["EIdx"] - m_idx) == 0].shape[0]
-    den_tol = aligned_tol.shape[0]
-    num_tol = aligned_tol[(aligned_tol["EIdx"] - m_idx) >= 1].shape[0]
+with st.expander("展开/收起 明细 - 同月Cohort 严格12"):
+    if not detail_strict.empty:
+        cols = [c for c in ["Month","cohort规模","早于当月到期","分子","分母","续费率","当月应续(严格)","口径"] if c in detail_strict.columns]
+        st.dataframe(detail_strict[cols].rename(columns={"Month":"月份"}))
+    else:
+        st.info("无明细数据")
 
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.metric("cohort规模", f"{cohort_size:,}")
-        st.metric("早于当月到期", f"{earlier:,}")
-    with c2:
-        st.metric("严格12 分母", f"{den_strict:,}")
-        st.metric("严格12 分子", f"{num_strict:,}")
-    with c3:
-        st.metric("当月应续(严格)", f"{due_now:,}")
-        st.metric("严格12 续费率", f"{(round(num_strict/den_strict*100,2) if den_strict>0 else None)}%")
-    with c4:
-        st.metric("12~14分母", f"{den_tol:,}")
-        st.metric("12~14分子", f"{num_tol:,}")
-        st.metric("12~14续费率", f"{(round(num_tol/den_tol*100,2) if den_tol>0 else None)}%")
+with st.expander("展开/收起 明细 - 同月Cohort 12~14 容差"):
+    if not detail_tol.empty:
+        cols2 = [c for c in ["Month","cohort规模","早于当月到期","分子","分母","续费率","口径"] if c in detail_tol.columns]
+        st.dataframe(detail_tol[cols2].rename(columns={"Month":"月份"}))
+    else:
+        st.info("无明细数据")
 
 st.caption("说明：同月 Cohort 以‘历年同月首入且首入<当月’为样本。严格12仅统计周年同月，12~14容差包含周年同月至+2月；分母含当月应续，分子仅包含当月之后窗口。")
 
 st.divider()
 st.subheader("下载明细")
 for name, d in charts:
-    st.write(name, d.head(12))
+    try:
+        st.write(name, d.head(12))
+        st.download_button(
+            "下载 " + name,
+            d.to_csv(index=False).encode("utf-8-sig"),
+            file_name=name,
+            mime="text/csv",
+        )
+    except Exception:
+        pass
+
+# 额外提供“明细-严格12/容差”下载（含预计算的更多数值）
+if not detail_strict.empty:
     st.download_button(
-        "下载 " + name,
-        d.to_csv(index=False).encode("utf-8-sig"),
-        file_name=name,
+        "下载 同月Cohort明细-严格12.csv",
+        detail_strict.to_csv(index=False).encode("utf-8-sig"),
+        file_name="cohort_detail_strict.csv",
+        mime="text/csv",
+    )
+if not detail_tol.empty:
+    st.download_button(
+        "下载 同月Cohort明细-12~14容差.csv",
+        detail_tol.to_csv(index=False).encode("utf-8-sig"),
+        file_name="cohort_detail_tolerance.csv",
         mime="text/csv",
     )
