@@ -3,6 +3,7 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 from datetime import datetime
+import io
 
 # 兼容 Streamlit 工作目录差异，确保可导入 app.logic
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
@@ -332,10 +333,55 @@ if not detail_strict.empty:
         file_name="cohort_detail_strict.csv",
         mime="text/csv",
     )
-if not detail_tol.empty:
-    st.download_button(
-        "下载 同月Cohort明细-12~14容差.csv",
-        detail_tol.to_csv(index=False).encode("utf-8-sig"),
-        file_name="cohort_detail_tolerance.csv",
-        mime="text/csv",
-    )
+    if not detail_tol.empty:
+        st.download_button(
+            "下载 同月Cohort明细-12~14容差.csv",
+            detail_tol.to_csv(index=False).encode("utf-8-sig"),
+            file_name="cohort_detail_tolerance.csv",
+            mime="text/csv",
+        )
+
+# ============ 音频工具：MP3 音量放大 ============
+st.divider()
+st.subheader("音频工具：MP3 音量放大")
+st.caption("说明：在浏览器端上传 MP3，服务端放大音量后导出为 MP3。需要本机/容器存在 ffmpeg。")
+
+uploaded_mp3 = st.file_uploader("上传 MP3 文件", type=["mp3"], key="mp3_uploader")
+col_gain, col_limit = st.columns([2,1])
+with col_gain:
+    gain_db = st.slider("增益 (dB)", min_value=-20, max_value=20, value=6, step=1)
+with col_limit:
+    avoid_clip = st.checkbox("避免削波(自动降级到 -1dBFS)", value=True)
+
+if uploaded_mp3 is not None:
+    try:
+        from pydub import AudioSegment
+        # 读取并放大
+        seg = AudioSegment.from_file(uploaded_mp3, format="mp3")
+        before_dbfs = round(seg.dBFS, 2) if seg.dBFS is not None else None
+        out_seg = seg.apply_gain(gain_db)
+        # 自动防削波：若峰值高于 -1 dBFS，则下调
+        try:
+            peak_dbfs = out_seg.max_dBFS  # 可能为 None（极少），加保护
+        except Exception:
+            peak_dbfs = None
+        if avoid_clip and peak_dbfs is not None and peak_dbfs > -1.0:
+            adjust = -1.0 - peak_dbfs
+            out_seg = out_seg.apply_gain(adjust)
+        after_dbfs = round(out_seg.dBFS, 2) if out_seg.dBFS is not None else None
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.metric("放大前 平均响度(dBFS)", before_dbfs)
+        with c2:
+            st.metric("放大后 平均响度(dBFS)", after_dbfs)
+
+        # 导出为 MP3 到内存
+        buf = io.BytesIO()
+        out_seg.export(buf, format="mp3", bitrate="192k")
+        buf.seek(0)
+        base = os.path.splitext(uploaded_mp3.name)[0]
+        out_name = f"{base}_gain{gain_db:+d}dB.mp3"
+        st.download_button("下载放大后的 MP3", data=buf.getvalue(), file_name=out_name, mime="audio/mpeg")
+    except Exception as e:
+        st.error(f"处理失败：{e}\n可能未安装 ffmpeg，请在本机安装后重试，或在 Docker 部署镜像中包含 ffmpeg。")
