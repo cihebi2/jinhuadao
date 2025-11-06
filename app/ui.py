@@ -12,6 +12,8 @@ if _ROOT not in sys.path:
 
 from app.logic import normalize_and_filter, compute_cohort_monthly, compute_bca_monthly
 
+st.set_page_config(page_title="续费率仪表盘", layout="wide")
+
 # 左侧功能导航与音频工具渲染
 with st.sidebar:
     st.header("功能导航")
@@ -50,7 +52,6 @@ if _nav == "MP3 音频音量放大":
     _render_audio_tool()
     st.stop()
 
-st.set_page_config(page_title="续费率仪表盘", layout="wide")
 
 st.title("续费率仪表盘（上传 CSV/XLSX）")
 
