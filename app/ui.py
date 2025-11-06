@@ -12,6 +12,44 @@ if _ROOT not in sys.path:
 
 from app.logic import normalize_and_filter, compute_cohort_monthly, compute_bca_monthly
 
+# 左侧功能导航与音频工具渲染
+with st.sidebar:
+    st.header("功能导航")
+    _nav = st.radio("选择功能", ["续费率仪表盘", "MP3 音频音量放大"], index=0)
+
+def _render_audio_tool():
+    st.divider()
+    st.subheader("音频工具：MP3 音量放大")
+    st.caption("说明：拖拽或点击上传 MP3，服务端放大后导出为 MP3。需要 ffmpeg。")
+    up = st.file_uploader("拖拽或点击上传 MP3 文件", type=["mp3"], key="mp3_uploader_nav")
+    c1, c2 = st.columns([2,1])
+    with c1:
+        gain_db = st.slider("增益 (dB)", min_value=-20, max_value=20, value=6, step=1)
+    with c2:
+        avoid_clip = st.checkbox("避免削波(自动降至 -1dBFS)", value=True)
+    if up is not None:
+        try:
+            from pydub import AudioSegment
+            seg = AudioSegment.from_file(up, format="mp3")
+            out = seg.apply_gain(gain_db)
+            try:
+                peak = out.max_dBFS
+            except Exception:
+                peak = None
+            if avoid_clip and peak is not None and peak > -1.0:
+                out = out.apply_gain(-1.0 - peak)
+            buf = io.BytesIO()
+            out.export(buf, format="mp3", bitrate="192k")
+            buf.seek(0)
+            base = os.path.splitext(up.name)[0]
+            st.download_button("下载放大后的 MP3", data=buf.getvalue(), file_name=f"{base}_gain{gain_db:+d}dB.mp3", mime="audio/mpeg")
+        except Exception as e:
+            st.error(f"处理失败：{e}")
+
+if _nav == "MP3 音频音量放大":
+    _render_audio_tool()
+    st.stop()
+
 st.set_page_config(page_title="续费率仪表盘", layout="wide")
 
 st.title("续费率仪表盘（上传 CSV/XLSX）")
