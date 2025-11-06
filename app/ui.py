@@ -364,6 +364,59 @@ for name, d in charts:
     except Exception:
         pass
 
+# 导出：分析工作簿（Excel）汇总
+try:
+    import pandas as _pd
+    import io as _io
+    _buf = _io.BytesIO()
+    with _pd.ExcelWriter(_buf, engine="openpyxl") as _writer:
+        try:
+            c1 = cstrict_cn if 'cstrict_cn' in locals() else None
+            if c1 is not None:
+                (c1.rename(columns={"Month":"月份"})).to_excel(_writer, index=False, sheet_name="同月Cohort_严格12")
+        except Exception:
+            pass
+        try:
+            c2 = ctol_cn if 'ctol_cn' in locals() else None
+            if c2 is not None:
+                (c2.rename(columns={"Month":"月份"})).to_excel(_writer, index=False, sheet_name="同月Cohort_12-14")
+        except Exception:
+            pass
+        try:
+            if 'bcn' in locals():
+                (bcn.rename(columns={"Month":"月份"})).to_excel(_writer, index=False, sheet_name="BCA_严格12")
+        except Exception:
+            pass
+        try:
+            if 'btn' in locals():
+                (btn.rename(columns={"Month":"月份"})).to_excel(_writer, index=False, sheet_name="BCA_12-14")
+        except Exception:
+            pass
+        try:
+            if 'pivot_perm' in locals():
+                pivot_perm.to_excel(_writer, sheet_name="权限状态分布", index=True)
+        except Exception:
+            pass
+        try:
+            if 'pivot_method' in locals():
+                pivot_method.to_excel(_writer, sheet_name="加入方式分布", index=True)
+        except Exception:
+            pass
+        try:
+            if 'detail_strict' in locals():
+                detail_strict.to_excel(_writer, index=False, sheet_name="明细_严格12")
+        except Exception:
+            pass
+        try:
+            if 'detail_tol' in locals():
+                detail_tol.to_excel(_writer, index=False, sheet_name="明细_12-14")
+        except Exception:
+            pass
+    _buf.seek(0)
+    st.download_button("下载 分析工作簿(Excel)", data=_buf.getvalue(), file_name="续费率分析_汇总.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+except Exception:
+    pass
+
 # 额外提供“明细-严格12/容差”下载（含预计算的更多数值）
 if not detail_strict.empty:
     st.download_button(
