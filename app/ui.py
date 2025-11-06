@@ -122,6 +122,31 @@ def _layer_counts_and_rate(counts_long: pd.DataFrame, rate_long: pd.DataFrame, h
     )
     return alt.layer(layer_counts, layer_rate).resolve_scale(y='independent').properties(height=height).interactive()
 
+# 年度续费率（事件口径）：从 B/C/A 月度结果按年汇总
+def _annual_from_bca(bca_monthly: pd.DataFrame) -> pd.DataFrame:
+    if bca_monthly is None or bca_monthly.empty:
+        return pd.DataFrame(columns=["Year","A_sum","B_sum","C_sum","A_in_C_sum","分子","分母","续费率"])
+    d = bca_monthly.copy()
+    d["Year"] = d["Month"].str.slice(0, 4)
+    g = d.groupby("Year", as_index=False).agg({
+        "A":"sum","B":"sum","C":"sum","A_in_C":"sum","Renew":"sum","Base":"sum"
+    })
+    g["RatePct"] = (g["Renew"] / g["Base"] * 100).round(2)
+    g = g.rename(columns={
+        "A":"A_sum","B":"B_sum","C":"C_sum","A_in_C":"A_in_C_sum",
+        "Renew":"分子","Base":"分母","RatePct":"续费率"
+    })
+    return g
+
+def _annual_plot_frames(df_year_cn: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if df_year_cn is None or df_year_cn.empty:
+        return pd.DataFrame(columns=["月份","指标","人数"]), pd.DataFrame(columns=["月份","数值"]) 
+    d = df_year_cn.copy()
+    d["月份"] = pd.to_datetime(d["Year"] + "-01-01", errors="coerce")
+    counts_long = d.melt(id_vars=["月份"], value_vars=["分子","分母"], var_name="指标", value_name="人数")
+    rate_long = d[["月份","续费率"]].rename(columns={"续费率":"数值"})
+    return counts_long, rate_long
+
 # 预计算：同月 Cohort 明细（避免每次选择都重新计算）
 def _compute_cohort_details(df: pd.DataFrame, end_month: pd.Timestamp, tol_max_mod: int) -> pd.DataFrame:
     import pandas as pd
@@ -325,6 +350,29 @@ if "B/C/A-12~14容差" in logic_select:
     dl_btn_rate = _cohort_long_rate(btn)
     st.altair_chart(_layer_counts_and_rate(dl_btn_pair, dl_btn_rate), use_container_width=True)
     charts.append(("bca_tol.csv", _select_month_cn(btn, cols_b2)))
+
+# ===== 年度续费率（事件口径） =====
+st.divider()
+st.subheader("年度续费率（事件口径）")
+try:
+    bca_m_strict = compute_bca_monthly(DF, end_m, tolerance_max_mod=0)
+    bca_m_tol = compute_bca_monthly(DF, end_m, tolerance_max_mod=2)
+    ann_strict = _annual_from_bca(bca_m_strict)
+    ann_tol = _annual_from_bca(bca_m_tol)
+    # 严格12
+    if not ann_strict.empty:
+        st.write("年度（严格12）")
+        st.dataframe(ann_strict[["Year","分子","分母","续费率","A_sum","B_sum","C_sum","A_in_C_sum"]])
+        cnt_long, rate_long = _annual_plot_frames(ann_strict)
+        st.altair_chart(_layer_counts_and_rate(cnt_long, rate_long), use_container_width=True)
+    # 12~14 容差
+    if not ann_tol.empty:
+        st.write("年度（12~14 容差）")
+        st.dataframe(ann_tol[["Year","分子","分母","续费率","A_sum","B_sum","C_sum","A_in_C_sum"]])
+        cnt_long2, rate_long2 = _annual_plot_frames(ann_tol)
+        st.altair_chart(_layer_counts_and_rate(cnt_long2, rate_long2), use_container_width=True)
+except Exception:
+    pass
 
 # ============ 续费率明细（单月拆解） ============
 st.divider()
