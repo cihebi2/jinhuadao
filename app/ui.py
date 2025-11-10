@@ -461,29 +461,9 @@ try:
         except Exception:
             pass
     _buf.seek(0)
-        # annual summaries (事件口径)
-        try:
-            if 'ann_strict' in locals():
-                ann_strict.to_excel(_writer, index=False, sheet_name="annual_12")
-            else:
-                _b1 = compute_bca_monthly(DF, end_m, tolerance_max_mod=0)
-                _a1 = _annual_from_bca(_b1)
-                if _a1 is not None and not _a1.empty:
-                    _a1.to_excel(_writer, index=False, sheet_name="annual_12")
-        except Exception:
-            pass
-        try:
-            if 'ann_tol' in locals():
-                ann_tol.to_excel(_writer, index=False, sheet_name="annual_12_14")
-            else:
-                _b2 = compute_bca_monthly(DF, end_m, tolerance_max_mod=2)
-                _a2 = _annual_from_bca(_b2)
-                if _a2 is not None and not _a2.empty:
-                    _a2.to_excel(_writer, index=False, sheet_name="annual_12_14")
-        except Exception:
-            pass
-
-
+    st.download_button("下载 分析工作簿(Excel)", data=_buf.getvalue(), file_name="续费率分析_汇总.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+except Exception:
+    pass
 # ===== Annual renewal (4-year cohort) =====
 st.divider()
 st.subheader("Annual Renewal (4-year cohort)")
