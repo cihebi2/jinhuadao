@@ -461,67 +461,53 @@ try:
         except Exception:
             pass
     _buf.seek(0)
-    st.download_button("下载 分析工作簿(Excel)", data=_buf.getvalue(), file_name="续费率分析_汇总.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-except Exception:
-    pass
-
-# 额外提供“明细-严格12/容差”下载（含预计算的更多数值）
-if not detail_strict.empty:
-    st.download_button(
-        "下载 同月Cohort明细-严格12.csv",
-        detail_strict.to_csv(index=False).encode("utf-8-sig"),
-        file_name="cohort_detail_strict.csv",
-        mime="text/csv",
-    )
-    if not detail_tol.empty:
-        st.download_button(
-            "下载 同月Cohort明细-12~14容差.csv",
-            detail_tol.to_csv(index=False).encode("utf-8-sig"),
-            file_name="cohort_detail_tolerance.csv",
-            mime="text/csv",
-        )
-
-# ============ 音频工具：MP3 音量放大 ============
-st.divider()
-st.subheader("音频工具：MP3 音量放大")
-st.caption("说明：在浏览器端上传 MP3，服务端放大音量后导出为 MP3。需要本机/容器存在 ffmpeg。")
-
-uploaded_mp3 = st.file_uploader("上传 MP3 文件", type=["mp3"], key="mp3_uploader")
-col_gain, col_limit = st.columns([2,1])
-with col_gain:
-    gain_db = st.slider("增益 (dB)", min_value=-20, max_value=20, value=6, step=1)
-with col_limit:
-    avoid_clip = st.checkbox("避免削波(自动降级到 -1dBFS)", value=True)
-
-if uploaded_mp3 is not None:
-    try:
-        from pydub import AudioSegment
-        # 读取并放大
-        seg = AudioSegment.from_file(uploaded_mp3, format="mp3")
-        before_dbfs = round(seg.dBFS, 2) if seg.dBFS is not None else None
-        out_seg = seg.apply_gain(gain_db)
-        # 自动防削波：若峰值高于 -1 dBFS，则下调
+        # annual summaries (事件口径)
         try:
-            peak_dbfs = out_seg.max_dBFS  # 可能为 None（极少），加保护
+            if 'ann_strict' in locals():
+                ann_strict.to_excel(_writer, index=False, sheet_name="annual_12")
+            else:
+                _b1 = compute_bca_monthly(DF, end_m, tolerance_max_mod=0)
+                _a1 = _annual_from_bca(_b1)
+                if _a1 is not None and not _a1.empty:
+                    _a1.to_excel(_writer, index=False, sheet_name="annual_12")
         except Exception:
-            peak_dbfs = None
-        if avoid_clip and peak_dbfs is not None and peak_dbfs > -1.0:
-            adjust = -1.0 - peak_dbfs
-            out_seg = out_seg.apply_gain(adjust)
-        after_dbfs = round(out_seg.dBFS, 2) if out_seg.dBFS is not None else None
+            pass
+        try:
+            if 'ann_tol' in locals():
+                ann_tol.to_excel(_writer, index=False, sheet_name="annual_12_14")
+            else:
+                _b2 = compute_bca_monthly(DF, end_m, tolerance_max_mod=2)
+                _a2 = _annual_from_bca(_b2)
+                if _a2 is not None and not _a2.empty:
+                    _a2.to_excel(_writer, index=False, sheet_name="annual_12_14")
+        except Exception:
+            pass
 
-        c1, c2 = st.columns(2)
-        with c1:
-            st.metric("放大前 平均响度(dBFS)", before_dbfs)
-        with c2:
-            st.metric("放大后 平均响度(dBFS)", after_dbfs)
 
-        # 导出为 MP3 到内存
-        buf = io.BytesIO()
-        out_seg.export(buf, format="mp3", bitrate="192k")
-        buf.seek(0)
-        base = os.path.splitext(uploaded_mp3.name)[0]
-        out_name = f"{base}_gain{gain_db:+d}dB.mp3"
-        st.download_button("下载放大后的 MP3", data=buf.getvalue(), file_name=out_name, mime="audio/mpeg")
-    except Exception as e:
-        st.error(f"处理失败：{e}\n可能未安装 ffmpeg，请在本机安装后重试，或在 Docker 部署镜像中包含 ffmpeg。")
+# ===== Annual renewal (4-year cohort) =====
+st.divider()
+st.subheader("Annual Renewal (4-year cohort)")
+st.caption("For year Y: Numerator=A where join_year in {Y-1..Y-4} and expire_year=Y+1; Denominator=A + B where B has expire_year=Y.")
+
+def _annual_4yr_cohort(df: pd.DataFrame, end_month: pd.Timestamp) -> pd.DataFrame:
+    d = df.copy()
+    d["JoinYear"] = d["FJM"].dt.year
+    d["ExpireYear"] = d["EXM"].dt.year
+    years = sorted(d["ExpireYear"].unique())
+    rows = []
+    for Y in years:
+        join_set = {Y-1, Y-2, Y-3, Y-4}
+        a = d[(d["JoinYear"].isin(join_set)) & (d["ExpireYear"] == Y+1)].shape[0]
+        b = d[(d["JoinYear"].isin(join_set)) & (d["ExpireYear"] == Y)].shape[0]
+        base = a + b
+        rate = round(a/base*100, 2) if base > 0 else None
+        rows.append({"Year": str(Y), "分子": a, "分母": base, "续费率": rate})
+    return pd.DataFrame(rows)
+
+_ann = _annual_4yr_cohort(DF, end_m)
+if not _ann.empty:
+    st.dataframe(_ann[["Year","分子","分母","续费率"]])
+    _ann_plot = _ann.copy(); _ann_plot["月份"] = pd.to_datetime(_ann_plot["Year"]+"-01-01")
+    _counts = _ann_plot.melt(id_vars=["月份"], value_vars=["分子","分母"], var_name="指标", value_name="人数")
+    _rate = _ann_plot[["月份","续费率"]].rename(columns={"续费率":"数值"})
+    st.altair_chart(_layer_counts_and_rate(_counts, _rate), use_container_width=True)
